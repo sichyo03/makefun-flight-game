@@ -2,12 +2,12 @@
 // steps, the renderer paints what is there, and the engine note follows the throttle.
 // Screens: title, play, paused, and the end-of-sortie summary.
 //
-// ?seed=N fixes the coast and the course. ?shot=cover|rings|landing|cargo (with &seed=N)
-// stages that scene with an autopilot instead of running the loop, paints it until the
-// camera settles, and sets window.__shotReady for a screenshot.
+// ?seed=N fixes the coast and the course. ?shot=title|cover|rings|cargo|landing
+// (with &seed=N) stages that scene with an autopilot instead of running the loop,
+// paints it until the camera settles, and sets window.__shotReady for a screenshot.
 import { BEST_KEY, STEP } from './config.js';
-import { createRandom } from './random.js';
-import { createWorld, EVENT_DONE, EVENT_OVER, EVENT_REFUEL } from './world.js';
+import { createRng } from './rng.js';
+import { createWorld, EVENT_DONE, EVENT_DROP, EVENT_OVER, EVENT_REFUEL } from './world.js';
 import { ACTION_CONFIRM, ACTION_PAUSE, ACTION_RESTART, createInput } from './input.js';
 import { createRenderer, SCREEN_OVER, SCREEN_PAUSED, SCREEN_PLAY, SCREEN_TITLE } from './render.js';
 import { createAudio } from './audio.js';
@@ -16,7 +16,6 @@ import { stageShot } from './shots.js';
 // Mission events arrive shifted out of the world's low bits (see world.js).
 const MISSION_RING = 1 << 8;
 const MISSION_CRATE_DOWN = 4 << 8;
-const WORLD_DROP = 16;
 
 /** The longest frame the loop catches up on; a longer stall (a hidden tab) is dropped. */
 const MAX_FRAME = 0.25;
@@ -28,7 +27,7 @@ const seed = Number.isInteger(seedParam) ? seedParam : Math.floor(Math.random() 
 
 const canvas = document.getElementById('game');
 const status = document.getElementById('status');
-const world = createWorld(createRandom(seed));
+const world = createWorld(createRng(seed));
 const renderer = createRenderer(canvas);
 const audio = createAudio();
 
@@ -89,7 +88,11 @@ function runGame() {
       best = world.state.score;
       saveBest(best);
     }
-    announce(world.state.success ? `Sortie complete. Score ${world.state.score}.` : `Sortie over. ${world.state.overReason} Score ${world.state.score}.`);
+    announce(
+      world.state.success
+        ? `Sortie complete. Score ${world.state.score}.`
+        : `Sortie over. ${world.state.overReason} Score ${world.state.score}.`,
+    );
   }
 
   function handleActions() {
@@ -106,13 +109,19 @@ function runGame() {
   }
 
   function step() {
-    const controls = screen === SCREEN_TITLE ? { pitch: 0, roll: 0, throttle: 0, brake: true, drop: false } : input.read();
+    const controls =
+      screen === SCREEN_TITLE
+        ? { pitch: 0, roll: 0, throttle: 0, brake: true, drop: false, flaps: false }
+        : input.read();
+    if (controls.flaps) audio.flaps();
+    const comboBefore = world.missions.combo;
     const events = world.step(STEP, controls, screen === SCREEN_TITLE);
     const plane = world.plane;
+    if (comboBefore > 0 && world.missions.combo === 0 && world.missions.phase === 'rings') audio.comboLost();
 
     // Sounds, from the world's events and the aeroplane's own edges.
-    if (events & MISSION_RING) audio.ring();
-    if (events & WORLD_DROP) audio.drop();
+    if (events & MISSION_RING) audio.ring(world.missions.combo);
+    if (events & EVENT_DROP) audio.drop();
     if (events & MISSION_CRATE_DOWN) {
       const last = world.missions.crateResults[world.missions.crateResults.length - 1];
       audio.crateDown(last && last.score >= 500);

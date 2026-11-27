@@ -1,8 +1,9 @@
-// The aeroplane and how it flies: throttle against drag, pitch against gravity, banked
-// turns that cost speed, a stall that drops the nose, and wheels that only forgive a
-// gentle arrival on the strip. Arcade-honest: every control answers at every speed,
-// but the wing still quits when you ask it to fly too slowly.
-import { PLANE, RUNWAY } from './config.js';
+// The aeroplane and how it flies: throttle against drag, pitch against gravity,
+// banked turns that cost speed, a stall that drops the nose, flaps that buy a slower
+// approach, a sea breeze that pushes the airframe sideways, and wheels that only
+// forgive a gentle arrival on the strip. Arcade-honest: every control answers at
+// every speed, but the wing still quits when you ask it to fly too slowly.
+import { PLANE, RUNWAY, WIND } from './config.js';
 
 export const EVENT_TAKEOFF = 1;
 export const EVENT_TOUCHDOWN = 2;
@@ -22,6 +23,14 @@ function wrapAngle(angle) {
   return a;
 }
 
+/** The wind at time t: { vx, vz } in m/s, gusting and slowly veering. */
+export function windAt(t) {
+  const gust = 0.5 + 0.5 * Math.sin((t / WIND.gustPeriod) * TAU);
+  const speed = WIND.baseSpeed + WIND.gustAmp * gust * gust;
+  const dir = WIND.dirBase + WIND.dirSwing * Math.sin((t / WIND.dirPeriod) * TAU + 1.3);
+  return { vx: Math.sin(dir) * speed, vz: Math.cos(dir) * speed, speed, dir };
+}
+
 /** A fresh aeroplane parked at the south end of the runway, engine idling. */
 export function createPlane() {
   return {
@@ -31,9 +40,11 @@ export function createPlane() {
     heading: RUNWAY.heading,
     pitch: 0,
     roll: 0,
-    speed: 0,
+    speed: 0, // airspeed along the flight path (wind drift is added separately)
     throttle: 0,
     vy: 0,
+    flaps: 0, // 0 = up, 1 = down; moves smoothly toward flapsTarget
+    flapsTarget: 0,
     onGround: true,
     stalled: false,
     propAngle: 0,
@@ -44,7 +55,7 @@ export function createPlane() {
   };
 }
 
-/** Put the aeroplane back on the runway, whole and fuelled (fuel itself lives in the world). */
+/** Put the aeroplane back on the runway, whole and fuelled (fuel lives in the world). */
 export function resetPlane(plane) {
   Object.assign(plane, createPlane());
 }
@@ -65,24 +76,44 @@ export function headingDegrees(plane) {
   return ((deg % 360) + 360) % 360;
 }
 
+/** The stall speed for the current flap setting, interpolated while flaps travel. */
+export function stallSpeedNow(plane) {
+  return PLANE.stallSpeed + (PLANE.stallSpeedFlaps - PLANE.stallSpeed) * plane.flaps;
+}
+
 /**
- * Advance the aeroplane one step. `input` is { pitch, roll, throttle, brake } with
- * pitch/roll/throttle in -1..1 (pitch +1 = nose up, roll +1 = bank right,
- * throttle +1 = open up). `terrain` provides groundHeightAt/onRunway. Returns event flags.
+ * The crab angle (radians) to add to a desired ground track so the wind's push
+ * cancels: point the nose this far into the wind and the track stays true.
  */
-export function stepPlane(plane, input, terrain, dt) {
+export function windCorrection(plane, wind, desiredTrack) {
+  const crossWind = wind.vx * Math.cos(desiredTrack) - wind.vz * Math.sin(desiredTrack);
+  return Math.asin(clamp(crossWind / Math.max(plane.speed, 12), -0.5, 0.5));
+}
+
+/**
+ * Advance the aeroplane one step. `input` is { pitch, roll, throttle, brake, flaps }
+ * with pitch/roll/throttle in -1..1 (pitch +1 = nose up, roll +1 = bank right,
+ * throttle +1 = open up, flaps = toggle request). `terrain` provides
+ * groundHeightAt/onRunway. `wind` is the current { vx, vz }. Returns event flags.
+ */
+export function stepPlane(plane, input, terrain, wind, dt) {
   if (plane.crashed) return 0;
   let events = 0;
 
   // --- Controls -------------------------------------------------------------
   plane.throttle = clamp(plane.throttle + input.throttle * dt * 0.85, 0, 1);
+  if (input.flaps) plane.flapsTarget = plane.flapsTarget > 0.5 ? 0 : 1;
+  const flapRate = 0.55 * dt; // full travel in a little under two seconds
+  plane.flaps += clamp(plane.flapsTarget - plane.flaps, -flapRate, flapRate);
 
   const wasStalled = plane.stalled;
-  plane.stalled = !plane.onGround && plane.speed < PLANE.stallSpeed;
+  plane.stalled = !plane.onGround && plane.speed < stallSpeedNow(plane);
   if (plane.stalled && !wasStalled) events |= EVENT_STALL;
   const authority = plane.stalled ? 0.45 : 1; // mushy controls in the stall
 
-  const pitchTarget = plane.stalled ? -0.34 : clamp(plane.pitch + input.pitch * dt * PLANE.pitchRate * authority, PLANE.pitchMin, PLANE.pitchMax);
+  const pitchTarget = plane.stalled
+    ? -0.34
+    : clamp(plane.pitch + input.pitch * dt * PLANE.pitchRate * authority, PLANE.pitchMin, PLANE.pitchMax);
   plane.pitch += clamp(pitchTarget - plane.pitch, -PLANE.pitchRate * dt, PLANE.pitchRate * dt);
   if (plane.onGround) plane.pitch = clamp(plane.pitch, 0, PLANE.pitchMax);
 
@@ -98,6 +129,7 @@ export function stepPlane(plane, input, terrain, dt) {
   // --- Speed: engine, drag, gravity along the flight path -------------------
   let accel = plane.throttle * PLANE.engineAccel - PLANE.dragK * plane.speed * plane.speed;
   accel -= PLANE.gravity * Math.sin(plane.pitch) * 0.92;
+  accel -= PLANE.flapDrag * plane.flaps * Math.min(1, plane.speed / 40);
   if (plane.onGround) {
     accel -= PLANE.groundFriction * Math.sign(plane.speed);
     if (input.brake) accel -= PLANE.brakeDecel * Math.sign(plane.speed);
@@ -115,13 +147,19 @@ export function stepPlane(plane, input, terrain, dt) {
 
   // --- Vertical: the wing carries you only while it has speed ---------------
   let vy = Math.sin(plane.pitch) * plane.speed;
-  if (plane.stalled) vy -= (PLANE.stallSpeed - plane.speed) * 0.62 + 2.2;
+  if (plane.stalled) vy -= (stallSpeedNow(plane) - plane.speed) * 0.62 + 2.2;
   plane.vy = vy;
 
   const fwd = forwardVector(plane);
   plane.x += fwd.x * plane.speed * dt;
   plane.z += fwd.z * plane.speed * dt;
   plane.y += vy * dt;
+  // The wind moves the whole air mass — and the aeroplane with it. On the ground
+  // the wheels hold her; in the air she drifts, so headings need crabbing.
+  if (!plane.onGround) {
+    plane.x += wind.vx * dt;
+    plane.z += wind.vz * dt;
+  }
   plane.propAngle = (plane.propAngle + dt * (4 + plane.throttle * 46)) % TAU;
 
   // --- Ground ---------------------------------------------------------------
@@ -138,7 +176,9 @@ export function stepPlane(plane, input, terrain, dt) {
     const onStrip = terrain.onRunway(plane.x, plane.z, 6);
     // The flattened apron beside the strip forgives a gentle arrival — roughly.
     const onApron = !onStrip && terrain.onRunway(plane.x, plane.z, 48) && Math.abs(ground - RUNWAY.height) < 2.5;
-    const aligned = Math.abs(wrapAngle(plane.heading - RUNWAY.heading)) < 0.35 || Math.abs(wrapAngle(plane.heading - RUNWAY.heading - Math.PI)) < 0.35;
+    const aligned =
+      Math.abs(wrapAngle(plane.heading - RUNWAY.heading)) < 0.35 ||
+      Math.abs(wrapAngle(plane.heading - RUNWAY.heading - Math.PI)) < 0.35;
     plane.lastTouchdown = { vSpeed: -vy, onRunway: onStrip, rough: onApron, aligned, speed: plane.speed };
     if ((onStrip || onApron) && aligned && -vy < 13 && Math.abs(plane.roll) < 0.3) {
       plane.onGround = true;
@@ -162,7 +202,7 @@ export function stepPlane(plane, input, terrain, dt) {
   return events;
 }
 
-/** Altitude above the ground directly below, in metres — what the altimeter should show. */
+/** Altitude above the ground directly below, in metres — what the altimeter shows. */
 export function altitudeAboveGround(plane, terrain) {
   return Math.max(0, plane.y - PLANE.gearHeight - terrain.groundHeightAt(plane.x, plane.z));
 }

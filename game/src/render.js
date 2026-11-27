@@ -1,10 +1,13 @@
-// The view from behind the courier: a simple honest 3D projection over a flat-shaded
-// heightfield coast. Terrain quads are painted far-to-near, the runway and rings are
-// projected polygons, and the aeroplane itself is drawn in screen space at the centre
-// of the frame, banked and pitched with the real one — the classic chase view.
+// The view from behind the courier at golden hour: an honest 3D projection over a
+// flat-shaded heightfield coast. Terrain quads are painted far-to-near; the runway,
+// rings, town, boats and birds are projected polygons; the aeroplane is drawn in
+// screen space at the heart of the frame, banked and pitched with the real one —
+// the classic chase view. The sun sits low in the south-west, so the sea glints
+// and every cloud wears a warm edge.
 import { CAMERA, COLORS, RUNWAY, WORLD } from './config.js';
 import { terrainColor } from './terrain.js';
 import { drawHud, drawOverlay } from './hud.js';
+import { predictCrateLanding } from './world.js';
 
 export const SCREEN_TITLE = 'title';
 export const SCREEN_PLAY = 'play';
@@ -57,6 +60,7 @@ function buildTerrainQuads(terrain) {
         cz: (a.z + c.z) / 2,
         cy: Math.max(0, avg),
         color: terrainColor(avg, slope),
+        water: avg <= -2,
       });
     }
   }
@@ -134,13 +138,15 @@ export function createRenderer(canvas) {
   function drawSky(view) {
     const grad = ctx.createLinearGradient(0, 0, 0, height);
     grad.addColorStop(0, COLORS.skyTop);
-    grad.addColorStop(0.55, COLORS.skyMid);
-    grad.addColorStop(0.78, COLORS.skyLow);
+    grad.addColorStop(0.45, COLORS.skyMid);
+    grad.addColorStop(0.72, COLORS.skyLow);
+    grad.addColorStop(0.92, COLORS.skyHorizon);
     grad.addColorStop(1, COLORS.haze);
     ctx.fillStyle = grad;
     ctx.fillRect(0, 0, width, height);
-    // The sun: fixed in the south-west sky, so it sweeps as you turn.
-    const sunDir = normalize({ x: -0.55, y: 0.62, z: -0.45 });
+    // The low sun: fixed in the south-west sky, so it sweeps as you turn and
+    // floods the frame with gold when you fly toward it.
+    const sunDir = normalize({ x: -0.62, y: 0.2, z: -0.5 });
     const sunPoint = {
       x: view.camPos.x + sunDir.x * 3000,
       y: view.camPos.y + sunDir.y * 3000,
@@ -148,14 +154,14 @@ export function createRenderer(canvas) {
     };
     const s = view.project(sunPoint);
     if (s) {
-      const glow = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, height * 0.34);
-      glow.addColorStop(0, 'rgba(255,243,196,0.85)');
-      glow.addColorStop(0.18, 'rgba(255,243,196,0.35)');
-      glow.addColorStop(1, 'rgba(255,243,196,0)');
+      const glow = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, height * 0.5);
+      glow.addColorStop(0, 'rgba(255, 220, 150, 0.9)');
+      glow.addColorStop(0.16, COLORS.sunGlow);
+      glow.addColorStop(1, 'rgba(255, 196, 110, 0)');
       ctx.fillStyle = glow;
       ctx.fillRect(0, 0, width, height);
       ctx.beginPath();
-      ctx.arc(s.x, s.y, height * 0.035, 0, TAU);
+      ctx.arc(s.x, s.y, height * 0.042, 0, TAU);
       ctx.fillStyle = COLORS.sun;
       ctx.fill();
     }
@@ -184,11 +190,49 @@ export function createRenderer(canvas) {
         }
         pts.push(p);
       }
-      if (ok) poly(pts, q.color);
+      if (!ok) continue;
+      poly(pts, q.color);
+      // Sun glint: a few water quads flash gold as the light catches them.
+      if (q.water && Math.sin(frameTime * 1.7 + q.cx * 0.011 + q.cz * 0.017) > 0.86) {
+        ctx.globalAlpha = 0.28;
+        poly(pts, COLORS.waterGlint);
+        ctx.globalAlpha = 1;
+      }
     }
   }
 
-  function drawRunway(view) {
+  /** The windsock beside the touchdown zone: a pole and an orange sock that
+   *  streams with the wind and droops when it eases — the wind made visible. */
+  function drawWindsock(view, spot, terrain, wind) {
+    const gy = terrain.groundHeightAt(spot.x, spot.z);
+    const top = view.project({ x: spot.x, y: gy + 11, z: spot.z });
+    const base = view.project({ x: spot.x, y: gy, z: spot.z });
+    if (!top || !base || top.z > CAMERA.far) return;
+    ctx.strokeStyle = '#e8e4da';
+    ctx.lineWidth = Math.max(1.4, 120 / top.z);
+    ctx.beginPath();
+    ctx.moveTo(base.x, base.y);
+    ctx.lineTo(top.x, top.y);
+    ctx.stroke();
+    // The sock: points downwind, length and droop by wind strength.
+    const len = Math.max(5, (3.2 + wind.speed * 0.55) * (900 / top.z));
+    const droop = Math.max(0, 1 - wind.speed / 11) * len * 0.55;
+    const tip = view.project({
+      x: spot.x + Math.sin(wind.dir) * (3.2 + wind.speed * 0.55),
+      y: gy + 11 - Math.max(0, 1 - wind.speed / 11) * 3.4,
+      z: spot.z + Math.cos(wind.dir) * (3.2 + wind.speed * 0.55),
+    });
+    if (tip) {
+      ctx.strokeStyle = COLORS.beacon;
+      ctx.lineWidth = Math.max(2, 260 / top.z);
+      ctx.beginPath();
+      ctx.moveTo(top.x, top.y);
+      ctx.quadraticCurveTo((top.x + tip.x) / 2, (top.y + tip.y) / 2 + droop * 0.3, tip.x, tip.y);
+      ctx.stroke();
+    }
+  }
+
+  function drawRunway(view, plane) {
     const y = RUNWAY.height + 0.35;
     const hw = RUNWAY.width / 2;
     const hl = RUNWAY.length / 2;
@@ -208,8 +252,7 @@ export function createRenderer(canvas) {
       ];
       if (pts.every(Boolean)) poly(pts, COLORS.asphalt);
     }
-    // Threshold bars and centreline dashes, in paint white.
-    ctx.fillStyle = COLORS.runwayPaint;
+    // Threshold bars, centreline dashes and touchdown-zone marks, in paint white.
     const paint = (px, pz, w, l) => {
       const pts = [
         view.project({ x: px - w / 2, y: y + 0.06, z: pz - l / 2 }),
@@ -224,6 +267,8 @@ export function createRenderer(canvas) {
       paint(RUNWAY.x + i * 8, z1 - 26, 3.4, 34);
     }
     for (let z = z0 + 90; z < z1 - 80; z += 70) paint(RUNWAY.x, z, 2.2, 34);
+    paint(RUNWAY.x - 9, z0 + 210, 3, 46);
+    paint(RUNWAY.x + 9, z0 + 210, 3, 46);
     // Edge lights: amber dots down both sides.
     for (let z = z0; z <= z1; z += 75) {
       for (const ex of [x0 - 3, x1 + 3]) {
@@ -235,6 +280,30 @@ export function createRenderer(canvas) {
           ctx.fill();
         }
       }
+    }
+    // Approach sequencer ("the rabbit"): a chase of white flashes running in
+    // toward the threshold from the south, so final is easy to find at dusk.
+    for (let i = 0; i < 7; i += 1) {
+      const p = view.project({ x: RUNWAY.x, y: y + 1.5, z: z0 - 60 - i * 65 });
+      if (!p) continue;
+      const lit = Math.floor(frameTime * 2.2) % 7 === i;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, Math.max(1.4, (lit ? 340 : 150) / p.z), 0, TAU);
+      ctx.fillStyle = lit ? '#ffffff' : 'rgba(255,255,255,0.35)';
+      ctx.fill();
+    }
+    // PAPI: four boxes beside the touchdown zone. On a 3° glidepath two show
+    // white and two red; too high is all white, too low all red.
+    const aimZ = z0 + 240;
+    const distToAim = Math.max(1, aimZ - plane.z);
+    const glide = Math.atan2(plane.y - (RUNWAY.height + 3), distToAim) * (180 / Math.PI);
+    const whites = glide > 3.7 ? 4 : glide > 3.2 ? 3 : glide > 2.7 ? 2 : glide > 2.2 ? 1 : 0;
+    for (let i = 0; i < 4; i += 1) {
+      const p = view.project({ x: x0 - 14 - i * 7, y: y + 1.6, z: aimZ });
+      if (!p) continue;
+      const s = Math.max(2, 220 / p.z);
+      ctx.fillStyle = i < whites ? '#ffffff' : '#ff4a3e';
+      ctx.fillRect(p.x - s / 2, p.y - s / 2, s, s);
     }
   }
 
@@ -276,12 +345,26 @@ export function createRenderer(canvas) {
       ctx.lineWidth = widthPx * 0.8;
       ctx.stroke();
     }
+    // The ring's number, hung at its crown so the course order reads at a glance.
+    const crown = view.project({ x: ring.x, y: ring.y + ring.radius + 7, z: ring.z });
+    if (crown && crown.z < 1500) {
+      const size = Math.max(10, Math.min(30, 2600 / crown.z));
+      ctx.font = `bold ${size}px Arial, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = state === 'next' ? '#ffd23e' : 'rgba(234,246,255,0.75)';
+      ctx.fillText(String(ring.number), crown.x, crown.y);
+    }
   }
 
   function drawDropZone(view, zone, terrain) {
     const gy = terrain.groundHeightAt(zone.x, zone.z);
     // Ground target: concentric rings laid on the clearing.
-    for (const [r, color] of [[zone.radius, COLORS.beacon], [zone.radius * 0.55, '#ffffff'], [zone.radius * 0.22, COLORS.beacon]]) {
+    for (const [r, color] of [
+      [zone.radius, COLORS.beacon],
+      [zone.radius * 0.55, '#ffffff'],
+      [zone.radius * 0.22, COLORS.beacon],
+    ]) {
       const pts = [];
       let ok = true;
       for (let i = 0; i <= 24; i += 1) {
@@ -294,8 +377,6 @@ export function createRenderer(canvas) {
         pts.push(p);
       }
       if (ok) {
-        // Outlines, not filled discs: a filled target swallows the frame at
-        // low altitude, a ring reads as painted ground markings.
         ctx.beginPath();
         ctx.moveTo(pts[0].x, pts[0].y);
         for (const p of pts) ctx.lineTo(p.x, p.y);
@@ -318,6 +399,40 @@ export function createRenderer(canvas) {
       ctx.globalAlpha = 0.16 + 0.07 * Math.sin(frameTime * 2.4);
       poly(beam, COLORS.beacon);
       ctx.globalAlpha = 1;
+    }
+  }
+
+  /** The bomb-sight: where a crate dropped now would land, as a ground cross. */
+  function drawBombSight(view, world) {
+    const hit = predictCrateLanding(world.missions, world.plane, world.terrain, world.wind);
+    if (!hit) return;
+    const gy = world.terrain.groundHeightAt(hit.x, hit.z);
+    const c = view.project({ x: hit.x, y: gy + 1.2, z: hit.z });
+    if (!c) return;
+    const inZone = hit.dist <= world.missions.dropZone.radius;
+    const s = Math.max(6, Math.min(26, 2400 / c.z));
+    ctx.strokeStyle = inZone ? COLORS.hudGood : '#ffb84e';
+    ctx.lineWidth = 2.4;
+    ctx.beginPath();
+    ctx.arc(c.x, c.y, s, 0, TAU);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(c.x - s * 1.5, c.y);
+    ctx.lineTo(c.x + s * 1.5, c.y);
+    ctx.moveTo(c.x, c.y - s * 1.5);
+    ctx.lineTo(c.x, c.y + s * 1.5);
+    ctx.stroke();
+    // A dotted fall line from the belly to the cross.
+    const belly = view.project({ x: world.plane.x, y: world.plane.y - 3, z: world.plane.z });
+    if (belly) {
+      ctx.setLineDash([4, 6]);
+      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(belly.x, belly.y);
+      ctx.lineTo(c.x, c.y);
+      ctx.stroke();
+      ctx.setLineDash([]);
     }
   }
 
@@ -344,6 +459,127 @@ export function createRenderer(canvas) {
     ctx.strokeRect(p.x - s * 0.42, p.y - s * 0.1, s * 0.84, s * 0.7);
   }
 
+  /** The harbour town: little houses with pitched roofs on the flat west ground. */
+  function drawTown(view, houses) {
+    const sorted = houses
+      .map((h) => ({ h, depth: view.depthOf(h) }))
+      .filter((e) => e.depth > 4 && e.depth < CAMERA.far)
+      .sort((a, b) => b.depth - a.depth);
+    for (const { h } of sorted) {
+      const cos = Math.cos(h.rot);
+      const sin = Math.sin(h.rot);
+      const corner = (dx, dy, dz) =>
+        view.project({ x: h.x + dx * cos - dz * sin, y: h.y + dy, z: h.z + dx * sin + dz * cos });
+      const hw = h.w / 2;
+      const hd = h.d / 2;
+      // Walls (front face only — the chase view rarely sees more) and the roof.
+      const front = [corner(-hw, 0, hd), corner(hw, 0, hd), corner(hw, h.h, hd), corner(-hw, h.h, hd)];
+      const side = [corner(hw, 0, hd), corner(hw, 0, -hd), corner(hw, h.h, -hd), corner(hw, h.h, hd)];
+      const roof = [
+        corner(-hw - 1, h.h, hd + 1),
+        corner(hw + 1, h.h, hd + 1),
+        corner(hw + 1, h.h, -hd - 1),
+        corner(-hw - 1, h.h, -hd - 1),
+      ];
+      const ridge = [
+        corner(-hw - 1, h.h, hd + 1),
+        corner(hw + 1, h.h, hd + 1),
+        corner(0, h.h + h.h * 0.55, 0),
+      ];
+      if (front.every(Boolean)) poly(front, h.wall);
+      if (side.every(Boolean)) poly(side, h.wall);
+      if (roof.every(Boolean)) poly(roof, h.roof);
+      if (ridge.every(Boolean)) poly(ridge, h.roof);
+    }
+  }
+
+  /** The lighthouse: a striped tower with a slowly rotating beam. */
+  function drawLighthouse(view, spot, terrain) {
+    const gy = terrain.groundHeightAt(spot.x, spot.z);
+    const top = view.project({ x: spot.x, y: gy + 34, z: spot.z });
+    const base = view.project({ x: spot.x, y: gy, z: spot.z });
+    if (!top || !base || top.z > CAMERA.far) return;
+    const w = Math.max(2, 260 / top.z);
+    ctx.fillStyle = '#f2ece2';
+    ctx.fillRect(base.x - w / 2, top.y, w, base.y - top.y);
+    ctx.fillStyle = '#c9403d';
+    ctx.fillRect(base.x - w / 2, top.y + (base.y - top.y) * 0.35, w, (base.y - top.y) * 0.2);
+    ctx.fillRect(base.x - w / 2, top.y + (base.y - top.y) * 0.7, w, (base.y - top.y) * 0.2);
+    // Rotating beam: a translucent wedge sweeping the water.
+    const angle = frameTime * 0.7;
+    const tip = view.project({
+      x: spot.x + Math.sin(angle) * 420,
+      y: gy + 6,
+      z: spot.z + Math.cos(angle) * 420,
+    });
+    if (tip) {
+      ctx.globalAlpha = 0.18;
+      ctx.beginPath();
+      ctx.moveTo(top.x, top.y);
+      ctx.lineTo(tip.x - 14, tip.y);
+      ctx.lineTo(tip.x + 14, tip.y);
+      ctx.closePath();
+      ctx.fillStyle = '#ffe9b0';
+      ctx.fill();
+      ctx.globalAlpha = 1;
+    }
+    ctx.beginPath();
+    ctx.arc(top.x, top.y, Math.max(2, 200 / top.z), 0, TAU);
+    ctx.fillStyle = '#fff3c4';
+    ctx.fill();
+  }
+
+  /** Fishing boats on slow circuits, with a wake. */
+  function drawBoats(view, boats) {
+    for (const boat of boats) {
+      const x = boat.cx + Math.cos(boat.phase) * boat.radius;
+      const z = boat.cz + Math.sin(boat.phase) * boat.radius;
+      const p = view.project({ x, y: 1.2, z });
+      if (!p || p.z > CAMERA.far) continue;
+      const s = Math.max(2.5, 900 / p.z);
+      // Wake: a fading V behind the hull.
+      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+      ctx.lineWidth = Math.max(1, s * 0.08);
+      ctx.beginPath();
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(p.x - s * 1.6, p.y + s * 0.5);
+      ctx.moveTo(p.x, p.y);
+      ctx.lineTo(p.x + s * 1.6, p.y + s * 0.5);
+      ctx.stroke();
+      // Hull and little cabin.
+      ctx.fillStyle = boat.hue;
+      ctx.beginPath();
+      ctx.moveTo(p.x - s * 0.9, p.y);
+      ctx.lineTo(p.x + s * 0.9, p.y);
+      ctx.lineTo(p.x + s * 0.6, p.y + s * 0.34);
+      ctx.lineTo(p.x - s * 0.6, p.y + s * 0.34);
+      ctx.closePath();
+      ctx.fill();
+      ctx.fillStyle = '#f2ece2';
+      ctx.fillRect(p.x - s * 0.22, p.y - s * 0.42, s * 0.44, s * 0.42);
+    }
+  }
+
+  /** Gulls: two flapping strokes wheeling over the harbour and the island. */
+  function drawBirds(view, birds, terrain) {
+    ctx.strokeStyle = 'rgba(30,40,52,0.8)';
+    for (const bird of birds) {
+      const x = bird.cx + Math.cos(bird.phase) * bird.radius;
+      const z = bird.cz + Math.sin(bird.phase) * bird.radius;
+      const y = terrain.groundHeightAt(x, z) + bird.cy + Math.sin(bird.phase * 2.3) * 6;
+      const p = view.project({ x, y, z });
+      if (!p || p.z > 1600) continue;
+      const s = Math.max(2, 320 / p.z);
+      const flap = Math.sin(bird.flap) * s * 0.5;
+      ctx.lineWidth = Math.max(1, s * 0.16);
+      ctx.beginPath();
+      ctx.moveTo(p.x - s, p.y + flap);
+      ctx.quadraticCurveTo(p.x - s * 0.4, p.y - s * 0.3, p.x, p.y);
+      ctx.quadraticCurveTo(p.x + s * 0.4, p.y - s * 0.3, p.x + s, p.y + flap);
+      ctx.stroke();
+    }
+  }
+
   function drawClouds(view, clouds) {
     const sorted = clouds
       .map((c) => ({ c, p: view.project(c) }))
@@ -352,12 +588,22 @@ export function createRenderer(canvas) {
     for (const { c, p } of sorted) {
       const s = (c.r / p.z) * view.focal;
       if (s < 4) continue;
-      ctx.fillStyle = 'rgba(255,255,255,0.78)';
-      for (const [ox, oy, r] of [[0, 0, 1], [-0.55, 0.12, 0.66], [0.55, 0.1, 0.72], [0.1, -0.22, 0.6]]) {
+      // Warm-lit tops, shaded bellies: the golden-hour read.
+      ctx.fillStyle = 'rgba(255,244,224,0.85)';
+      for (const [ox, oy, r] of [
+        [0, 0, 1],
+        [-0.55, 0.12, 0.66],
+        [0.55, 0.1, 0.72],
+        [0.1, -0.22, 0.6],
+      ]) {
         ctx.beginPath();
         ctx.ellipse(p.x + ox * s, p.y + oy * s * 0.4, s * r, s * r * 0.42, 0, 0, TAU);
         ctx.fill();
       }
+      ctx.fillStyle = 'rgba(232,180,140,0.35)';
+      ctx.beginPath();
+      ctx.ellipse(p.x, p.y + s * 0.18, s * 0.85, s * 0.3, 0, 0, Math.PI);
+      ctx.fill();
     }
   }
 
@@ -368,10 +614,38 @@ export function createRenderer(canvas) {
       const t = Math.max(0, p.life / p.maxLife);
       const r = Math.max(1.5, (p.kind === 'smoke' ? 260 : 150) / s.z) * (p.kind === 'smoke' ? 2 - t : 1);
       ctx.globalAlpha = Math.min(0.85, t * 1.2);
-      ctx.fillStyle = p.kind === 'fire' ? '#ff8a3e' : p.kind === 'splash' ? '#bfe6ff' : p.kind === 'spark' ? '#ffd23e' : p.kind === 'smoke' ? '#4a4f57' : '#d9c9a3';
+      ctx.fillStyle =
+        p.kind === 'fire'
+          ? '#ff8a3e'
+          : p.kind === 'splash'
+            ? '#bfe6ff'
+            : p.kind === 'spark'
+              ? '#ffd23e'
+              : p.kind === 'smoke'
+                ? '#4a4f57'
+                : p.kind === 'vapour'
+                  ? '#ffffff'
+                  : '#d9c9a3';
       ctx.beginPath();
       ctx.arc(s.x, s.y, r, 0, TAU);
       ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  /** Floating score popups where the points were earned. */
+  function drawPopups(view, popups) {
+    for (const p of popups) {
+      const s = view.project(p);
+      if (!s) continue;
+      const t = Math.max(0, p.life / p.maxLife);
+      const size = Math.max(13, Math.min(30, 2600 / s.z));
+      ctx.globalAlpha = Math.min(1, t * 1.6);
+      ctx.font = `bold ${size}px Arial, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillStyle = p.color;
+      ctx.fillText(p.text, s.x, s.y);
     }
     ctx.globalAlpha = 1;
   }
@@ -439,6 +713,34 @@ export function createRenderer(canvas) {
     ctx.fillStyle = COLORS.planeTrim;
     ctx.fillRect(-118 * u, -3 * u, 26 * u, 9 * u);
     ctx.fillRect(92 * u, -3 * u, 26 * u, 9 * u);
+    // Flaps: trailing-edge panels that droop as they travel down.
+    if (plane.flaps > 0.03) {
+      const droop = plane.flaps * 9 * u;
+      ctx.fillStyle = '#d8cfb8';
+      ctx.beginPath();
+      ctx.moveTo(-88 * u, 6 * u);
+      ctx.lineTo(-30 * u, 6 * u);
+      ctx.lineTo(-30 * u, 6 * u + droop);
+      ctx.lineTo(-88 * u, 6 * u + droop);
+      ctx.closePath();
+      ctx.fill();
+      ctx.beginPath();
+      ctx.moveTo(30 * u, 6 * u);
+      ctx.lineTo(88 * u, 6 * u);
+      ctx.lineTo(88 * u, 6 * u + droop);
+      ctx.lineTo(30 * u, 6 * u + droop);
+      ctx.closePath();
+      ctx.fill();
+    }
+    // Navigation lights: red on the left tip, green on the right, white on the tail.
+    ctx.fillStyle = COLORS.navRed;
+    ctx.beginPath();
+    ctx.arc(-116 * u, 2 * u, 3.4 * u, 0, TAU);
+    ctx.fill();
+    ctx.fillStyle = COLORS.navGreen;
+    ctx.beginPath();
+    ctx.arc(116 * u, 2 * u, 3.4 * u, 0, TAU);
+    ctx.fill();
     // Wing struts: the little braced wing of a bush courier.
     ctx.strokeStyle = COLORS.planeDark;
     ctx.lineWidth = 2.2 * u;
@@ -506,17 +808,24 @@ export function createRenderer(canvas) {
 
     drawSky(view);
     drawTerrain(view);
-    drawRunway(view);
+    drawRunway(view, plane);
+    drawWindsock(view, terrain.windsock, terrain, world.wind);
+    drawTown(view, terrain.houses);
+    drawLighthouse(view, terrain.lighthouse, terrain);
+    drawBoats(view, world.boats);
     // The drop zone only matters once the cargo phase begins; showing it
     // during the ring course clutters the low-altitude view.
     if (missions.phase !== 'rings') drawDropZone(view, missions.dropZone, terrain);
+    if (missions.phase === 'cargo') drawBombSight(view, world);
     missions.rings.forEach((ring, i) => {
       drawRing(view, ring, ring.passed ? 'done' : i === missions.ringIndex && missions.phase === 'rings' ? 'next' : 'idle');
     });
     if (missions.crate) drawCrate(view, missions.crate);
     drawClouds(view, world.clouds);
+    drawBirds(view, world.birds, terrain);
     drawParticles(view, world.particles);
     drawPlane(view, plane, terrain);
+    drawPopups(view, world.popups);
 
     drawHud(ctx, view, world);
     if (screen !== SCREEN_PLAY) drawOverlay(ctx, view, world, screen, best);

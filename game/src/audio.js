@@ -1,6 +1,7 @@
-// Sound: a little piston engine whose note follows the throttle, a chime for each ring,
-// a thud for the arrivals you'd rather forget. Everything is synthesised; nothing loads.
-// The context wakes on the first input, as browsers require, and stays silent until then.
+// Sound: a little piston engine whose note follows the throttle, a chime for each ring
+// (pitched up as the combo climbs), a thud for the arrivals you'd rather forget.
+// Everything is synthesised; nothing loads. The context wakes on the first input,
+// as browsers require, and stays silent until then.
 
 export function createAudio() {
   let ctx = null;
@@ -98,11 +99,13 @@ export function createAudio() {
         blip(880, t, 0.12, 'square', 0.05);
       }
     },
-    ring() {
+    /** Ring chime; the combo lifts the pitch a step per clean ring. */
+    ring(combo = 0) {
       if (!ensure()) return;
       const t = ctx.currentTime;
-      blip(880, t, 0.22);
-      blip(1318, t + 0.09, 0.3);
+      const lift = Math.pow(2, Math.min(combo, 8) / 12);
+      blip(880 * lift, t, 0.22);
+      blip(1318 * lift, t + 0.09, 0.3);
     },
     drop() {
       if (!ensure()) return;
@@ -134,6 +137,18 @@ export function createAudio() {
     refuelled() {
       if (!ensure()) return;
       blip(740, ctx.currentTime, 0.16, 'sine', 0.1);
+    },
+    /** The flap servo: a short mechanical whir as the panels travel. */
+    flaps() {
+      if (!ensure()) return;
+      const t = ctx.currentTime;
+      blip(220, t, 0.28, 'triangle', 0.07);
+      blip(185, t + 0.1, 0.24, 'triangle', 0.06);
+    },
+    /** A flat buzz when the combo chain breaks. */
+    comboLost() {
+      if (!ensure()) return;
+      blip(196, ctx.currentTime, 0.22, 'square', 0.06);
     },
   };
 }

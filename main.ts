@@ -42,3 +42,4 @@ const dossier = buildDossier(out, {
   game_path_max_bytes: 1000,
 });
 writeFileSync(join(out, 'dossier.json'), dossier);
+console.log(`dossier.json written (${dossier.length} bytes) to ${out}`);

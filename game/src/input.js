@@ -1,6 +1,7 @@
 // Controls: arrows or A/D bank the wings, Up/Down work the elevator, W/S (or Shift/Ctrl)
-// move the throttle, Space drops the crate, B brakes, P pauses. A pointer can steer too:
-// hold the left or right side to bank, the top or bottom to pitch, tap to confirm/drop.
+// move the throttle, F toggles the flaps, Space drops the crate, B brakes, P pauses.
+// A pointer can steer too: hold the left or right side to bank, the top or bottom to
+// pitch, tap to confirm/drop.
 
 export const ACTION_CONFIRM = 1;
 export const ACTION_PAUSE = 2;
@@ -26,6 +27,7 @@ export function createInput(canvas) {
   const held = new Set();
   let actions = 0;
   let dropQueued = false;
+  let flapsQueued = false;
   let pointer = null; // { x, y, id } in canvas fractions while a pointer is held
 
   function onKeyDown(event) {
@@ -40,6 +42,8 @@ export function createInput(canvas) {
       actions |= ACTION_CONFIRM;
       dropQueued = true;
       event.preventDefault();
+    } else if (event.code === 'KeyF') {
+      flapsQueued = true;
     } else if (event.code === 'KeyP' || event.code === 'Escape') {
       actions |= ACTION_PAUSE;
     } else if (event.code === 'KeyR') {
@@ -80,8 +84,20 @@ export function createInput(canvas) {
     pointer = null;
   }
 
+  function onWheel(event) {
+    // The wheel trims the throttle a notch at a time — handy on final.
+    if (event.deltaY < 0) held.add('throttleUp');
+    else if (event.deltaY > 0) held.add('throttleDown');
+    window.setTimeout(() => {
+      held.delete('throttleUp');
+      held.delete('throttleDown');
+    }, 120);
+    event.preventDefault();
+  }
+
   window.addEventListener('keydown', onKeyDown);
   window.addEventListener('keyup', onKeyUp);
+  canvas.addEventListener('wheel', onWheel, { passive: false });
   canvas.addEventListener('pointerdown', onPointerDown);
   canvas.addEventListener('pointermove', onPointerMove);
   canvas.addEventListener('pointerup', onPointerUp);
@@ -89,7 +105,7 @@ export function createInput(canvas) {
   window.addEventListener('blur', () => held.clear());
 
   return {
-    /** The flight controls for this step; `drop` is true once per press. */
+    /** The flight controls for this step; `drop`/`flaps` are true once per press. */
     read() {
       let pitch = (held.has('pitchUp') ? 1 : 0) - (held.has('pitchDown') ? 1 : 0);
       let roll = (held.has('rollRight') ? 1 : 0) - (held.has('rollLeft') ? 1 : 0);
@@ -103,7 +119,9 @@ export function createInput(canvas) {
       }
       const drop = dropQueued;
       dropQueued = false;
-      return { pitch, roll, throttle, brake: held.has('brake') || held.has('throttleDown'), drop };
+      const flaps = flapsQueued;
+      flapsQueued = false;
+      return { pitch, roll, throttle, brake: held.has('brake') || held.has('throttleDown'), drop, flaps };
     },
     /** Edge-triggered screen actions, consumed by the caller. */
     takeActions() {
